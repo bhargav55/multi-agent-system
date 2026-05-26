@@ -1,0 +1,4 @@
+node_modules
+.kanban
+.env
+.DS_Store

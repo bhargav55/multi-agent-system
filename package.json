@@ -1,0 +1,22 @@
+{
+  "name": "multi-agent-system",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Production-oriented multi-agent workflow system with Kanban-backed task execution.",
+  "bin": {
+    "multi-agent": "src/cli.ts"
+  },
+  "scripts": {
+    "plan": "bun run src/cli.ts plan",
+    "board": "bun run src/cli.ts board",
+    "next": "bun run src/cli.ts next",
+    "move": "bun run src/cli.ts move",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "latest",
+    "vitest": "latest"
+  }
+}
