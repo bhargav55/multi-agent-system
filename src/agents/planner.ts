@@ -67,13 +67,17 @@ export class DeterministicPlannerAgent implements PlannerAgent {
     const cards: KanbanCard[] = brief.requirements.map((requirement, index) => {
       const sequence = String(index + 1).padStart(3, "0");
       const title = titleFromRequirement(requirement);
+      const featurePrefix = brief.metadata.featureId ? `${brief.metadata.featureId.toLowerCase()}-` : "";
 
       return {
-        id: `card-${sequence}-${slugify(title)}`,
+        id: `${featurePrefix}card-${sequence}-${slugify(title)}`,
         title,
         status: "ready",
-        priority: index === 0 ? "P1" : "P2",
+        priority: brief.metadata.priority ?? (index === 0 ? "P1" : "P2"),
+        featureId: brief.metadata.featureId,
+        targetRepo: brief.metadata.targetRepo,
         sourceBrief: brief.path,
+        sourceSpec: brief.path,
         summary: brief.context[0] ?? brief.title,
         scopedRequirements: scopedRequirements(requirement, brief),
         createdAt: timestamp,

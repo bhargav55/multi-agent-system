@@ -1,3 +1,10 @@
+---
+feature_id: KA-001
+target_repo: bhargav55/knowledge-assistant
+priority: P1
+owner: planner-agent
+---
+
 # Build Portfolio Knowledge Assistant
 
 ## Context

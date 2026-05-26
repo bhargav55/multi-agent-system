@@ -12,7 +12,10 @@ const card = (id: string): KanbanCard => ({
   title: "Add endpoint",
   status: "ready",
   priority: "P1",
+  featureId: "KA-001",
+  targetRepo: "bhargav55/knowledge-assistant",
   sourceBrief: "specs/brief.md",
+  sourceSpec: "specs/brief.md",
   summary: "Build endpoint.",
   scopedRequirements: {
     goal: "Add endpoint.",

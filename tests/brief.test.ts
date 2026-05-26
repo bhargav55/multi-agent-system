@@ -33,6 +33,7 @@ The portfolio needs a knowledge assistant.
 
     expect(brief).toMatchObject({
       path: "specs/chatbot.md",
+      metadata: {},
       title: "Build Chatbot",
       context: ["The portfolio needs a knowledge assistant."],
       researchNotes: ["Static websites cannot hide secrets.", "Backend owns provider credentials."],
@@ -40,5 +41,32 @@ The portfolio needs a knowledge assistant.
       acceptanceCriteria: ["Answers cite sources."],
       outOfScope: ["Billing."],
     });
+  });
+
+  it("extracts collaboration frontmatter metadata", () => {
+    const brief = parseTaskBrief(
+      "features/assistant.md",
+      `---
+feature_id: KA-001
+target_repo: bhargav55/knowledge-assistant
+priority: P1
+owner: planner-agent
+---
+
+# Build Assistant
+
+## Requirements
+
+- Add scoped planning.
+`,
+    );
+
+    expect(brief.metadata).toEqual({
+      featureId: "KA-001",
+      targetRepo: "bhargav55/knowledge-assistant",
+      priority: "P1",
+      owner: "planner-agent",
+    });
+    expect(brief.title).toBe("Build Assistant");
   });
 });

@@ -44,6 +44,7 @@ Build a production knowledge assistant.
       status: "ready",
       priority: "P1",
       sourceBrief: "specs/assistant.md",
+      sourceSpec: "specs/assistant.md",
       summary: "Build a production knowledge assistant.",
       scopedRequirements: {
         goal: "Add a browser-safe chatbot endpoint.",
@@ -55,6 +56,37 @@ Build a production knowledge assistant.
     });
     expect(output.cards[0].scopedRequirements.impactedAreas).toContain("frontend");
     expect(output.cards[0].scopedRequirements.impactedAreas).toContain("backend");
+  });
+
+  it("propagates collaboration metadata into cards", () => {
+    const brief = parseTaskBrief(
+      "features/assistant.md",
+      `---
+feature_id: KA-001
+target_repo: bhargav55/knowledge-assistant
+priority: P0
+---
+
+# Assistant
+
+## Requirements
+
+- Add GitHub issue drafts.
+`,
+    );
+
+    const output = new DeterministicPlannerAgent().plan({
+      brief,
+      now: new Date("2026-05-26T00:00:00.000Z"),
+    });
+
+    expect(output.cards[0]).toMatchObject({
+      id: "ka-001-card-001-add-github-issue-drafts",
+      priority: "P0",
+      featureId: "KA-001",
+      targetRepo: "bhargav55/knowledge-assistant",
+      sourceSpec: "features/assistant.md",
+    });
   });
 
   it("rejects briefs without requirements", () => {

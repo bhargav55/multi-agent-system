@@ -12,7 +12,11 @@ export const cardToMarkdown = (card: KanbanCard): string => `# ${card.title}
 - ID: ${card.id}
 - Status: ${card.status}
 - Priority: ${card.priority}
+- Feature ID: ${card.featureId ?? "n/a"}
+- Target repo: ${card.targetRepo ?? "n/a"}
 - Source brief: ${card.sourceBrief}
+- Source spec: ${card.sourceSpec}
+- GitHub issue: ${card.githubIssue ? `#${card.githubIssue.number} ${card.githubIssue.url}` : "n/a"}
 - Created: ${card.createdAt}
 - Updated: ${card.updatedAt}
 

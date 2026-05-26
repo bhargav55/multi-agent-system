@@ -29,7 +29,14 @@ export type KanbanCard = {
   title: string;
   status: CardStatus;
   priority: CardPriority;
+  featureId?: string;
+  targetRepo?: string;
   sourceBrief: string;
+  sourceSpec: string;
+  githubIssue?: {
+    number: number;
+    url: string;
+  };
   summary: string;
   scopedRequirements: ScopedRequirements;
   createdAt: string;
@@ -44,6 +51,12 @@ export type Board = {
 
 export type TaskBrief = {
   path: string;
+  metadata: {
+    featureId?: string;
+    targetRepo?: string;
+    priority?: CardPriority;
+    owner?: string;
+  };
   title: string;
   context: string[];
   researchNotes: string[];

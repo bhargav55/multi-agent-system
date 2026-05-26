@@ -10,10 +10,41 @@ This is intentionally not a demo chatbot. The system is built around durable tas
 Markdown task brief
 -> Planner Agent researches and scopes the work
 -> Kanban cards are created with implementation-ready requirements
+-> GitHub issue drafts are generated for the target source-code repo
 -> Implementer Agent picks a card and executes only that scope
 -> Reviewer Agent checks the diff against acceptance criteria
 -> Orchestrator moves the card forward or back to Needs Fixes
 ```
+
+## Collaboration Repo Model
+
+Use a collaboration repo as the source of truth for feature specs and architecture docs. Source-code repos stay focused on implementation.
+
+```txt
+multi-agent-collaboration/
+  features/
+    knowledge-assistant-crawler.md
+  architecture/
+  decisions/
+  research/
+
+knowledge-assistant/
+multi-agent-system/
+bhargav-portfolio-poc/
+```
+
+Each feature spec declares the source-code repo that should receive GitHub issues:
+
+```yaml
+---
+feature_id: KA-001
+target_repo: bhargav55/knowledge-assistant
+priority: P1
+owner: planner-agent
+---
+```
+
+The planner reads the collaboration spec, creates Kanban cards, and preserves `target_repo` on every card. Issue creation can then use the card as the contract for implementation.
 
 ## Why Multi-Agent
 
@@ -102,11 +133,26 @@ Move a card:
 bun run src/cli.ts move card-001 in-progress
 ```
 
+Generate GitHub issue drafts from cards:
+
+```bash
+bun run src/cli.ts issue-drafts bhargav55/knowledge-assistant
+```
+
+The command currently prints issue-ready JSON. Live GitHub issue creation will be added after the card and issue payload contracts are stable.
+
 ## Markdown Brief Format
 
 Use headings and checklists. The deterministic planner works without an LLM and keeps the card model stable.
 
 ```md
+---
+feature_id: KA-001
+target_repo: bhargav55/knowledge-assistant
+priority: P1
+owner: planner-agent
+---
+
 # Build Portfolio Chatbot
 
 ## Context
@@ -145,10 +191,12 @@ Implemented now:
 - Planner agent contract.
 - Deterministic planner that creates scoped cards from Markdown briefs.
 - CLI for `plan`, `board`, `next`, and `move`.
+- GitHub issue draft generation from cards with `target_repo`.
 - Tests for planning and Kanban persistence.
 
 Next:
 
+- Add live GitHub issue creation and issue sync.
 - Add LLM-backed Planner Agent behind the same interface.
 - Add Implementer Agent contract and execution harness.
 - Add Reviewer Agent contract with diff/test input.

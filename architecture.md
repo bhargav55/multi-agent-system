@@ -13,11 +13,32 @@ Task brief markdown
   -> Orchestrator
   -> Planner Agent
   -> Kanban Store
+  -> GitHub issue drafts / source repo issues
   -> Implementer Agent
   -> Reviewer Agent
 ```
 
 The first milestone implements planning and Kanban state. Implementation and review are represented as contracts and will be added after the card schema is stable.
+
+## Repository Model
+
+The system separates collaboration artifacts from implementation artifacts.
+
+```txt
+Collaboration repo:
+  feature specs
+  architecture docs
+  decisions
+  research notes
+
+Source code repo:
+  issues
+  branches
+  pull requests
+  code
+```
+
+Feature specs declare `target_repo` in frontmatter. The planner copies that value into every generated card. Issue creation uses the card to create implementation issues in the target source-code repo.
 
 ## Agent Responsibilities
 
@@ -99,7 +120,11 @@ Each card contains:
 - `title`
 - `status`
 - `priority`
+- `featureId`
+- `targetRepo`
 - `sourceBrief`
+- `sourceSpec`
+- `githubIssue`
 - `summary`
 - `scopedRequirements`
 - `researchFindings`
@@ -113,11 +138,22 @@ Each card contains:
 
 The card is the contract between planner, implementer, and reviewer.
 
+## GitHub Issue Boundary
+
+GitHub issues are derived from cards, not the other way around.
+
+```txt
+feature spec -> planner -> card -> issue draft -> GitHub issue
+```
+
+The local card remains the orchestrator state. The GitHub issue is the source-code repo's execution artifact and links back to the collaboration spec.
+
 ## Planner Strategy
 
 The first implementation uses a deterministic planner:
 
 - parse Markdown headings
+- parse frontmatter metadata such as `feature_id`, `target_repo`, and `priority`
 - collect context and research notes
 - turn requirement bullets into cards
 - attach shared acceptance criteria and constraints

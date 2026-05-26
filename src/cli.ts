@@ -1,13 +1,15 @@
 #!/usr/bin/env bun
 import { planBriefToKanban } from "./orchestrator";
 import { LocalKanbanStore } from "./kanban/store";
+import { issueDraftsFromCards } from "./github/issues";
 
 const usage = () => {
   console.log(`Usage:
   multi-agent plan <brief.md>
   multi-agent board
   multi-agent next
-  multi-agent move <card-id> <status>`);
+  multi-agent move <card-id> <status>
+  multi-agent issue-drafts [target-repo]`);
 };
 
 const printBoard = async () => {
@@ -61,6 +63,14 @@ const main = async () => {
 
     const card = await new LocalKanbanStore().moveCard(cardId, status);
     console.log(JSON.stringify({ ok: true, id: card.id, status: card.status }, null, 2));
+    return;
+  }
+
+  if (command === "issue-drafts") {
+    const [repo] = args;
+    const board = await new LocalKanbanStore().readBoard();
+    const drafts = issueDraftsFromCards(board.cards, repo);
+    console.log(JSON.stringify({ ok: true, drafts }, null, 2));
     return;
   }
 
