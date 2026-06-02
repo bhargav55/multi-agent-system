@@ -32,6 +32,7 @@ jobs:
           # Use the official code-review skill, packaged as a plugin.
           plugin_marketplaces: "https://github.com/anthropics/claude-code.git"
           plugins: "code-review@claude-code-plugins"
-          prompt: "/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
+          # --comment posts findings as inline PR comments (default only logs them).
+          prompt: "/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}"
           # Defaults to Sonnet. Swap to "--model claude-opus-4-8" for deeper review.
           claude_args: "--model claude-sonnet-4-6"
