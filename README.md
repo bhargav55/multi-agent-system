@@ -1,107 +1,52 @@
 # Multi-Agent System
 
-A production-oriented TypeScript multi-agent workflow system for turning Markdown task briefs into scoped Kanban cards, then driving implementation and review through specialized agents.
+A production-oriented multi-agent workflow system where specialized agents
+**plan, implement, and review** engineering work, with **GitHub as the system of
+record**. Features and bugs are filed as GitHub issues; a planner decomposes
+them into tasks (sub-issues); an implementer writes the code and opens a pull
+request; a reviewer checks it against acceptance criteria. Humans validate the
+final implementation before merging.
 
-This is intentionally not a demo chatbot. The system is built around durable task state, typed agent contracts, auditable card files, and a simple local-first execution model that can later sync to GitHub Projects, Linear, Jira, or another work tracker.
+This is intentionally not a demo chatbot. The system is built around durable
+work state, typed agent contracts, and a clear hand-off model.
 
-## Core Workflow
+> **Design docs:** `architecture.md` (target architecture) and
+> `interview-grill.md` (the decision record behind it).
 
-```txt
-Markdown task brief
--> Planner Agent researches and scopes the work
--> Kanban cards are created with implementation-ready requirements
--> GitHub issue drafts are generated for the target source-code repo
--> Implementer Agent picks a card and executes only that scope
--> Reviewer Agent checks the diff against acceptance criteria
--> Orchestrator moves the card forward or back to Needs Fixes
-```
+## Status
 
-## Collaboration Repo Model
+The current `src/` code is an **earlier local-first prototype**: a deterministic
+Markdown-brief planner that writes Kanban cards to a local `.kanban/board.json`
+store, plus GitHub issue-draft generation. The project is **pivoting** to the
+GitHub-native, multi-service design described in `architecture.md`. The CLI
+below still works for the prototype; the new agent services are being built.
 
-Use a collaboration repo as the source of truth for feature specs and architecture docs. Source-code repos stay focused on implementation.
-
-```txt
-multi-agent-collaboration/
-  features/
-    knowledge-assistant-crawler.md
-  architecture/
-  decisions/
-  research/
-
-knowledge-assistant/
-multi-agent-system/
-bhargav-portfolio-poc/
-```
-
-Each feature spec declares the source-code repo that should receive GitHub issues:
-
-```yaml
----
-feature_id: KA-001
-target_repo: bhargav55/knowledge-assistant
-priority: P1
-owner: planner-agent
----
-```
-
-The planner reads the collaboration spec, creates Kanban cards, and preserves `target_repo` on every card. Issue creation can then use the card as the contract for implementation.
-
-## Why Multi-Agent
-
-The agents have different responsibilities:
-
-- Planner Agent: researches the brief, decomposes the work, defines scoped requirements, constraints, acceptance criteria, and test strategy.
-- Implementer Agent: reads one card at a time and executes the scoped requirements without expanding the task.
-- Reviewer Agent: reviews the implementation against the card, tests, risks, and acceptance criteria.
-
-This separation is useful because planning, implementation, and review benefit from different model choices and different prompts.
-
-Recommended model classes:
+## Target Workflow
 
 ```txt
-Planner Agent     -> Opus-class model
-Implementer Agent -> Sonnet-class model
-Reviewer Agent    -> GPT-5.5-class model
+GitHub issue (feature or bug)
+  -> Planner agent      creates sub-issues with scoped requirements + acceptance criteria
+  -> Implementer agent  claims a task, writes code, opens a PR
+  -> Reviewer agent      reviews the PR (bounded fix loop), then marks it ready for a human
+  -> Human               final review + merge
 ```
 
-Model names are configuration, not hardcoded business logic.
+- **Source of truth:** GitHub. **Board:** GitHub Projects (a view over issues).
+- **Runtime:** three always-on Railway services (planner / implementer /
+  reviewer) that coordinate purely through GitHub status — no queue, no
+  inter-service calls.
+- **Trigger:** polling (planner ~30 min; implementer/reviewer ~2-5 min), each
+  cycle draining all actionable work.
+- **Autonomy:** the full loop runs automatically; the only human gate is the PR
+  merge.
 
-## Kanban
+See `architecture.md` for the status state machine, isolation/secrets model, and
+deferred items (collaboration repo, cross-repo orchestration, webhooks,
+Postgres-backed monitoring).
 
-The first version is local-first:
+## Current Prototype (local-first CLI)
 
-```txt
-.kanban/board.json
-.kanban/cards/*.md
-```
-
-Columns:
-
-```txt
-Backlog
-Ready
-In Progress
-In Review
-Needs Fixes
-Done
-Blocked
-```
-
-Each card contains the planner's scoped requirements:
-
-- goal
-- in-scope requirements
-- out-of-scope boundaries
-- research findings
-- acceptance criteria
-- implementation notes
-- impacted areas
-- dependencies
-- test strategy
-
-The implementer should treat the card as the execution contract.
-
-## Commands
+The existing code turns a Markdown brief into local Kanban cards.
 
 Install:
 
@@ -139,11 +84,13 @@ Generate GitHub issue drafts from cards:
 bun run src/cli.ts issue-drafts bhargav55/knowledge-assistant
 ```
 
-The command currently prints issue-ready JSON. Live GitHub issue creation will be added after the card and issue payload contracts are stable.
+The command currently prints issue-ready JSON. Live GitHub issue creation is
+part of the pivot to the GitHub-native design.
 
 ## Markdown Brief Format
 
-Use headings and checklists. The deterministic planner works without an LLM and keeps the card model stable.
+Use headings and checklists. The deterministic planner works without an LLM and
+keeps the card model stable.
 
 ```md
 ---
@@ -182,30 +129,10 @@ The portfolio needs a production chatbot backed by a knowledge base.
 - Admin UI.
 ```
 
-## Current Scope
-
-Implemented now:
-
-- Typed Kanban card model.
-- Local JSON/Markdown Kanban store.
-- Planner agent contract.
-- Deterministic planner that creates scoped cards from Markdown briefs.
-- CLI for `plan`, `board`, `next`, and `move`.
-- GitHub issue draft generation from cards with `target_repo`.
-- Tests for planning and Kanban persistence.
-
-Next:
-
-- Add live GitHub issue creation and issue sync.
-- Add LLM-backed Planner Agent behind the same interface.
-- Add Implementer Agent contract and execution harness.
-- Add Reviewer Agent contract with diff/test input.
-- Add run traces and model/provider configuration.
-
 ## Production Principles
 
-- Durable state before automation.
-- Agent outputs are typed and persisted.
-- The implementer works from a card, not the original vague brief.
-- Review checks the card's acceptance criteria, not general vibes.
-- External integrations come after the local state model is stable.
+- Durable state before automation. GitHub is the system of record.
+- Agent outputs are typed and persisted as issues / sub-issues / PRs.
+- The implementer works from a scoped task, not the original vague brief.
+- Review checks acceptance criteria, not general vibes.
+- Humans validate the final implementation before merge.

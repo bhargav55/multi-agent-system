@@ -2,203 +2,161 @@
 
 ## Goal
 
-Build a production-grade multi-agent workflow system where specialized agents plan, implement, and review engineering work through a Kanban-backed task model.
+A production-grade multi-agent workflow system where specialized agents plan,
+implement, and review engineering work. **GitHub is the system of record** —
+issues are the work, GitHub Projects is the board, and pull requests are the
+deliverable. Agents do the work autonomously; humans validate the final
+implementation before merging.
 
-The system starts local-first because local files are easy to version, test, audit, and migrate. Integrations with GitHub Projects, Linear, Jira, or hosted databases can be added later behind the same store interface.
+> See `interview-grill.md` for the decision record behind this design.
+
+## Current State vs Target
+
+This document describes the **target v1 architecture** agreed in the design
+interview. The code in `src/` currently implements an **earlier local-first
+prototype**: a deterministic Markdown-brief planner writing to a local
+`.kanban/board.json` store. The pivot below replaces the local store with
+GitHub as the source of truth and introduces the implementer and reviewer
+agents. The migration (which files survive, what is rewritten) is still being
+scoped.
 
 ## System Boundary
 
 ```txt
-Task brief markdown
-  -> Orchestrator
-  -> Planner Agent
-  -> Kanban Store
-  -> GitHub issue drafts / source repo issues
-  -> Implementer Agent
-  -> Reviewer Agent
+GitHub issue (feature or bug)
+  -> Planner agent      (reads issue, writes sub-issues with scoped requirements)
+  -> GitHub sub-issues  ("tasks", tracked on a GitHub Projects board)
+  -> Implementer agent  (claims a task, writes code, opens a PR)
+  -> Reviewer agent      (reviews the PR against acceptance criteria)
+  -> Human               (final review + merge)
 ```
 
-The first milestone implements planning and Kanban state. Implementation and review are represented as contracts and will be added after the card schema is stable.
+Everything lives in a **single repository** for v1: issues, sub-issues, code,
+and pull requests. Cross-repo orchestration is deferred.
 
-## Repository Model
+## Source of Truth
 
-The system separates collaboration artifacts from implementation artifacts.
+GitHub holds all work state. There is **no separate task database**.
+
+- **Issue** = a feature request or bug.
+- **Sub-issue** = one implementable task under a feature.
+- **Project status field / labels** = the workflow state (the Kanban columns).
+- **Pull request** = the implementer's output, linked to its sub-issue.
+
+GitHub Projects is a *view* over these — the human-facing Kanban board — not a
+second store, so there is nothing to keep in sync.
+
+## Status State Machine
+
+State lives entirely in GitHub status (Project field + labels):
 
 ```txt
-Collaboration repo:
-  feature specs
-  architecture docs
-  decisions
-  research notes
-
-Source code repo:
-  issues
-  branches
-  pull requests
-  code
+needs-plan      -> a new issue awaiting planning
+ready           -> a sub-issue ready to be implemented
+in-progress     -> claimed by the implementer
+in-review       -> PR open, awaiting the reviewer
+needs-fixes      -> reviewer bounced it back (bounded retry loop)
+ready-for-human  -> reviewer passed it; awaiting human review + merge
+done            -> PR merged
+blocked         -> needs human input
 ```
 
-Feature specs declare `target_repo` in frontmatter. The planner copies that value into every generated card. Issue creation uses the card to create implementation issues in the target source-code repo.
+The reviewer↔implementer `needs-fixes` loop is **bounded** (a maximum number of
+fix attempts) before escalating to a human, so it cannot spin forever. The exact
+cap is still to be decided.
+
+## Runtime
+
+Three independent, always-on **Railway services**, one per agent. They never
+communicate directly — they coordinate **only through GitHub status**.
+
+```txt
+Planner service      polls issues labeled "needs-plan"     (~30 min)
+Implementer service  polls sub-issues in "ready"           (~2-5 min)
+Reviewer service     polls PRs / sub-issues in "in-review" (~2-5 min)
+```
+
+Each service, each cycle, **drains all actionable work** (processes tasks until
+none remain) so a feature can flow through multiple stages without waiting a
+full poll interval between every handoff.
+
+### Why polling, not webhooks
+
+For an AFK system no human waits in real time, so:
+
+- **GitHub status is the queue.** Each poll re-reads the current state.
+- **Crash recovery is free.** A restarted service simply re-polls and resumes
+  whatever is still in an actionable status — no in-memory task is ever lost.
+- **No webhook 10-second-ack constraint**, no public ingress, no signature
+  verification, no durability buffer.
+
+At 30-minute (planner) and few-minute (implementer/reviewer) intervals, API
+usage stays far under GitHub's free authenticated limit (5,000 requests/hour),
+especially with conditional requests (304s are free).
+
+### Claiming work safely
+
+Before starting long work, a service flips the item's status out of its trigger
+state (e.g. `ready -> in-progress`). The next poll's query then naturally skips
+it, so a task is never started twice. A single loop per service (concurrency 1)
+removes any race.
 
 ## Agent Responsibilities
 
 ### Planner Agent
 
-Input:
-
-- Markdown task brief.
-- Optional repository context.
-- Optional research notes.
-
-Output:
-
-- One or more Kanban cards.
-- Each card contains scoped requirements, research findings, acceptance criteria, constraints, impacted areas, dependencies, and test strategy.
-
-The planner is allowed to reason broadly, but its output must be concrete enough for the implementer to execute without reinterpreting the original brief.
+Input: a GitHub issue (+ repository context).
+Output: one or more **sub-issues**, each with a scoped goal, in/out-of-scope
+boundaries, acceptance criteria, and a test strategy. The planner may reason
+broadly, but each sub-issue must be concrete enough to implement without
+reinterpreting the original issue.
 
 ### Implementer Agent
 
-Input:
-
-- One Kanban card.
-- Repository context.
-- Allowed commands/tools.
-
-Output:
-
-- Code changes.
-- Test results.
-- Implementation notes.
-- Any blocker that prevents completion.
-
-The implementer must stay inside the card scope. New scope should create a new card or move the card to Blocked.
+Input: one sub-issue (+ repository context).
+Output: code changes on a branch, test results, and a pull request linked to the
+sub-issue. The implementer stays inside the task scope; new scope creates a
+follow-up sub-issue or moves the task to `blocked`.
 
 ### Reviewer Agent
 
-Input:
+Input: the pull request, its diff, test output, and the sub-issue's acceptance
+criteria.
+Output: findings ordered by severity and a pass/fail. On fail it moves the task
+to `needs-fixes` (re-entering the bounded loop); on pass it moves it to
+`ready-for-human`.
 
-- Kanban card.
-- Git diff.
-- Test output.
-- Implementation notes.
+## Isolation & Secrets
 
-Output:
-
-- Findings ordered by severity.
-- Pass/fail against acceptance criteria.
-- Required fixes or approval.
-
-## Kanban State Model
-
-Cards are durable records. They are stored as both machine-readable board state and human-readable Markdown files.
-
-```txt
-.kanban/board.json
-.kanban/cards/card-001-add-chatbot-endpoint.md
-```
-
-`board.json` is the index. Card Markdown is the reviewable task artifact.
-
-Statuses:
-
-```txt
-backlog
-ready
-in-progress
-in-review
-needs-fixes
-done
-blocked
-```
-
-## Card Contract
-
-Each card contains:
-
-- `id`
-- `title`
-- `status`
-- `priority`
-- `featureId`
-- `targetRepo`
-- `sourceBrief`
-- `sourceSpec`
-- `githubIssue`
-- `summary`
-- `scopedRequirements`
-- `researchFindings`
-- `acceptanceCriteria`
-- `implementationNotes`
-- `impactedAreas`
-- `dependencies`
-- `testStrategy`
-- `createdAt`
-- `updatedAt`
-
-The card is the contract between planner, implementer, and reviewer.
-
-## GitHub Issue Boundary
-
-GitHub issues are derived from cards, not the other way around.
-
-```txt
-feature spec -> planner -> card -> issue draft -> GitHub issue
-```
-
-The local card remains the orchestrator state. The GitHub issue is the source-code repo's execution artifact and links back to the collaboration spec.
-
-## Planner Strategy
-
-The first implementation uses a deterministic planner:
-
-- parse Markdown headings
-- parse frontmatter metadata such as `feature_id`, `target_repo`, and `priority`
-- collect context and research notes
-- turn requirement bullets into cards
-- attach shared acceptance criteria and constraints
-- infer impacted areas and test strategy from keywords
-
-This is deliberate. Stable state and tests come before LLM planning. An LLM-backed planner can later implement the same `PlannerAgent` interface.
-
-## Provider Configuration
-
-Model selection is configuration:
-
-```txt
-PLANNER_MODEL=opus-class-model
-IMPLEMENTER_MODEL=sonnet-class-model
-REVIEWER_MODEL=gpt-5.5-class-model
-```
-
-Provider integrations must not leak into card storage or orchestration logic.
-
-## Failure Handling
-
-- Invalid brief: fail before writing state.
-- Duplicate generated card title: deterministic IDs still remain unique.
-- Planner uncertainty: create a Blocked card with explicit missing context.
-- Implementer discovers new scope: create follow-up card, do not silently expand scope.
-- Reviewer rejects work: move card to `needs-fixes` with findings.
+- Each agent is its own service, so the service boundary is the isolation
+  boundary. The code-executing **implementer** cannot affect the planner or
+  reviewer.
+- The implementer service holds a **narrow, repo-scoped** GitHub credential
+  (`contents:write`, `pull_requests:write`). A leak means "can push to this
+  repo", not "controls the GitHub App".
+- Planner/reviewer credentials and any future database credentials are never
+  present in the implementer's environment.
 
 ## Observability
 
-Future run traces should record:
+Start with **structured logs per service** (which agent ran, on what item,
+model, token cost, status transitions, errors, timing). A shared **Postgres**
+instance for historical dashboards can be added later — strictly as telemetry,
+never as a second task store.
 
-- agent name
-- model/provider
-- input card/spec hash
-- output card IDs
-- commands run
-- tests run
-- status transitions
-- errors
+## Deferred
 
-The local-first version exposes state through `.kanban` files and CLI output.
+- **Collaboration repo** of long-form feature specs authored by PMs. If revived,
+  spec changes are append-only (add a new doc linking the old one).
+- **Cross-repo orchestration** — one control plane managing many source repos
+  (the original `target_repo` model).
+- **Webhooks** — only if instant reaction or many-repo scale is needed.
+- **Postgres-backed monitoring** dashboards.
 
 ## Testing Strategy
 
-- Planner tests verify Markdown brief decomposition and scoped requirements.
-- Store tests verify board persistence and status transitions.
-- Future implementer tests should use temporary Git repos and deterministic tool runners.
-- Future reviewer tests should use synthetic diffs and known acceptance criteria.
+- Planner tests verify issue → sub-issue decomposition and scoped requirements.
+- Implementer tests use temporary Git repos and deterministic tool runners.
+- Reviewer tests use synthetic diffs and known acceptance criteria.
+- The GitHub integration is exercised against a mockable client so the agents
+  remain testable without live API calls.
