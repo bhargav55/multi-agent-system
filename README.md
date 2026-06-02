@@ -16,6 +16,13 @@ Markdown task brief
 -> Orchestrator moves the card forward or back to Needs Fixes
 ```
 
+## Automated PR Review
+
+Pull requests can be reviewed automatically by Claude. Apply the `agent-review`
+label to a PR and the `.github/workflows/claude-pr-review.yml` workflow runs the
+official code-review plugin, posting feedback as review comments before a human
+reviewer takes over.
+
 ## Collaboration Repo Model
 
 Use a collaboration repo as the source of truth for feature specs and architecture docs. Source-code repos stay focused on implementation.
