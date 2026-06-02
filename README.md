@@ -44,6 +44,14 @@ See `architecture.md` for the status state machine, isolation/secrets model, and
 deferred items (collaboration repo, cross-repo orchestration, webhooks,
 Postgres-backed monitoring).
 
+## Automated PR Review (interim)
+
+Until the Reviewer agent service is in place, PRs can be reviewed by Claude via
+GitHub Actions: apply the `agent-review` label to a PR and
+`.github/workflows/claude-pr-review.yml` runs the official code-review plugin,
+posting feedback as review comments before a human reviewer takes over. This is
+an interim mechanism that the Reviewer agent will supersede over time.
+
 ## Current Prototype (local-first CLI)
 
 The existing code turns a Markdown brief into local Kanban cards.
