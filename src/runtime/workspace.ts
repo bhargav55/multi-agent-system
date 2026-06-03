@@ -25,6 +25,8 @@ export interface Workspace {
   runTests(dir: string): Promise<TestRun>;
   /** True if the working tree has uncommitted changes (the agent edited something). */
   hasChanges(dir: string): Promise<boolean>;
+  /** The current HEAD commit SHA (to detect commits the agent made during its run). */
+  currentSha(dir: string): Promise<string>;
   commitAll(dir: string, message: string): Promise<void>;
   push(dir: string, branch: string): Promise<void>;
   cleanup(dir: string): Promise<void>;
@@ -84,6 +86,11 @@ export class GitWorkspace implements Workspace {
   async hasChanges(dir: string): Promise<boolean> {
     const { stdout } = await execFileAsync("git", ["-C", dir, "status", "--porcelain"]);
     return stdout.trim().length > 0;
+  }
+
+  async currentSha(dir: string): Promise<string> {
+    const { stdout } = await execFileAsync("git", ["-C", dir, "rev-parse", "HEAD"]);
+    return stdout.trim();
   }
 
   async commitAll(dir: string, message: string): Promise<void> {

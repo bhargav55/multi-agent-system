@@ -5,8 +5,10 @@ local-first Kanban vision to a GitHub-native, polling-driven, multi-service
 agent system. Each decision below was reached by working down the dependency
 tree one branch at a time and pressure-testing the choice.
 
-_Status: design consensus for v1. Code does not yet implement this — see
-`architecture.md` "Current State vs Target" for the gap._
+_Status: decisions 1–17 record the issue + status-label design (now superseded).
+Decisions 18+ (third iteration, 2026-06-03) record the PR-first, no-issues
+runtime that is **implemented** in `src/` — see `architecture.md` and
+`prd/pr-first-runtime.md`._
 
 ## Locked decisions
 
@@ -74,9 +76,28 @@ human reviews+merges→ PR merged   → "Done"
 | 16 | **Where the plan lives** | The plan is a **committed repo file**, `plans/issue-<N>.md`. The planner commits it (via the Contents API) onto the issue's `task/<N>-slug` branch, so it rides into the implementer's PR. Consequence: the **planner gains `contents:write`** (it still runs no untrusted code). |
 | 17 | **Branch handoff** | Branch name is deterministic (`task/<N>-<slug>`). Planner creates the branch + plan; the implementer always re-checks-out that branch (new work and `needs-fixes` both), reads the plan file, and pushes code onto it; the reviewer sees plan + code in one PR diff. |
 
+## Third iteration — PR-first, no issues (resolved 2026-06-03)
+
+This iteration supersedes the issue + status-label state machine (decisions 1, 2,
+10, 11, 16, 17). The motivation: storing workflow state in labels created **two
+sources of truth that drift** — advancing state was a second API call after the
+real work, so a crash in that window left the label and reality disagreeing. The
+fix is to make the workflow state *be* the work.
+
+| # | Question | Decision |
+|---|----------|----------|
+| 18 | **No issues; PR is the unit of work from birth** | A human opens a PR from a same-repo branch adding exactly one `prds/<slug>.md` (PRD only). That single PR accumulates plan → code → review → merge. There is never a "feature without a PR", so no gap needs labels to cover it. GitHub issues are dropped entirely. |
+| 19 | **State is derived from PR contents, not stored** | Workflow state is a pure function of (PR changed files + native reviews + head SHA). A plan file exists ⇒ planning done; code exists ⇒ implementation done; head SHA reviewed ⇒ review done. No second write to keep consistent; a service can crash anywhere and the next poll recomputes the identical stage. |
+| 20 | **Managed-PR gate** | Managed iff the PR adds exactly one `prds/*.md` AND `headRepo === baseRepo`. 0 PRDs ⇒ ignored (ordinary human PRs are never touched); 2+ PRDs or a fork ⇒ `blocked`. Slug = the PRD basename. |
+| 21 | **Single authoritative label** | Only `blocked` is authoritative (the one state artifacts cannot express: "a stage ran but could not produce its artifact"). It excludes the PR from every trigger and is **cleared manually by a human**. A `status:*` projection label is write-only/cosmetic — never read, harmless if it drifts. |
+| 22 | **SHA-pinned reviews** | The load-bearing mechanism is `latestReview.commit_id === headSha`. The reviewer captures the head SHA, fetches the diff for that SHA, and submits the review with a **mandatory** `commitId` (never defaulting to latest). A head that moves mid-review self-heals into a fresh review; a stale review can never approve unseen code. *Requires branch protection's "dismiss stale reviews on push" to be OFF.* |
+| 23 | **Reviewer-owned fix cap (= 3)** | The reviewer counts only its **own** `CHANGES_REQUESTED` reviews (a human's review never consumes a round). On the third own CR it submits the review AND applies `blocked` + escalation in one cycle. The implementer-fix trigger does no counting — `blocked` is the sole enforcement point. |
+| 24 | **Planner reads but never executes** | The planner clones the head ref **read-only** (read tools only — no bash, no test run, no permission bypass) to explore, runs prd-to-plan non-interactively with **no plan-approval gate**, and commits the plan via the Contents API. Isolation boundary intact: it reads code but never runs it. |
+| 25 | **Thick phases / commit-per-phase / push-once** | Plans use **thick** end-to-end vertical-slice phases (overriding the usual thin-slice default) because all phases ship in one PR with no human checkpoint between them. The implementer makes one commit per phase, runs the test gate on the **final tree**, and does a **single push** at the end — so a crash before the push leaves nothing pushed and the work re-fires cleanly. |
+
 ## Infra (owner: human)
 
-GitHub App + installation, Railway services, and the GitHub Projects board with
-the `status:*` field are provisioned by the human. Code is built and tested
-against a **mockable GitHub client** so agents are exercised without live API
-calls until the infra exists.
+The human provisions the runtime (the three services and a repo-scoped token) and
+opens PRs that add a PRD. Code is built and tested against a **mockable GitHub
+client** so agents are exercised without live API calls; the Octokit adapter is
+verified against the real API separately.

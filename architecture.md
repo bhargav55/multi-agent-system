@@ -3,171 +3,212 @@
 ## Goal
 
 A production-grade multi-agent workflow system where specialized agents plan,
-implement, and review engineering work. **GitHub is the system of record** —
-issues are the work, GitHub Projects is the board, and pull requests are the
-deliverable. Agents do the work autonomously; humans validate the final
-implementation before merging.
+implement, and review engineering work. **The pull request is the unit of work
+from birth to merge**, and all workflow state is **derived from the PR's own
+contents** (its changed files, its native reviews, its head SHA) rather than
+stored in labels. Agents do the work autonomously; the only human gate is the
+merge.
 
-> See `interview-grill.md` for the decision record behind this design.
+> See `interview-grill.md` for the decision record and `prd/pr-first-runtime.md`
+> for the full specification.
 
-## Current State vs Target
+## Why PR-first (and not issues + status labels)
 
-The v1 runtime described below is **implemented** under `src/runtime/`,
-`src/github/`, and `src/agent/`, driven by the Claude Agent SDK and built
-against a mockable `GitHubClient` (so all agent logic is unit-tested without
-live API calls). `src/main.ts` is the single role-dispatching entrypoint.
+An earlier iteration modelled each unit of work as an issue carrying a machine of
+`status:*` / `type:*` / `fix-round:N` labels; services polled by label and *wrote
+the next label* to advance state. That created two sources of truth that drift:
+advancing state was a second API call after the real work (push code, *then* set
+the label), and a crash in that window left the label and reality disagreeing.
 
-What remains before it runs live is **infra the human provisions** (the GitHub
-App, the Railway services, and the Projects board) plus live verification of the
-Octokit client against the real API. The **earlier local-first prototype**
-(`src/agents/planner.ts`, `src/kanban/*`, `src/brief.ts`, the `board.json`
-plumbing, and the old CLI) is retained for now and will be removed once the new
-loop is proven (interview-grill.md, decision 13).
+PR-first removes the drift: the artifact's existence **is** the state. A plan file
+exists ⇒ planning is done; code exists ⇒ implementation is done; the head SHA is
+reviewed ⇒ review is done. There is no second write to keep consistent, and no
+"feature without a PR" gap that labels had to cover.
 
 ## System Boundary
 
 ```txt
-GitHub issue (feature or bug) — the issue body is the human-authored PRD
-  -> Planner agent      (reads the PRD, commits plans/issue-N.md to the task branch)
-  -> Implementer agent  (checks out the branch, follows the plan, opens one PR)
-  -> Reviewer agent      (reviews the PR against the PRD + plan + tests)
-  -> Human               (final review + merge)
+A human opens a PR from a same-repo branch adding exactly one prds/<slug>.md
+  -> Planner service      reads the PRD, commits plans/<slug>.md into the PR
+  -> Implementer service  commits code (all plan phases), pushes once
+  -> Reviewer service      submits a native review pinned to the head SHA
+  -> Human                merges once the latest review is an approval
 ```
 
-There are **no sub-issues** (decision 14): one issue is delivered as one PR.
-Everything lives in a **single repository** for v1: issues, plan files, code,
-and pull requests. Cross-repo orchestration is deferred.
+One PRD = one PR. Everything lives in a **single repository**; cross-repo
+orchestration is deferred. PRs from forks are unsupported (the planner and
+implementer must write to the PR's head branch) and are parked as `blocked`.
 
-## Source of Truth
+## State derivation
 
-GitHub holds all work state. There is **no separate task database**.
+State is a **pure function** of a PR — a managed-gate check plus five trigger
+predicates, with no I/O (`src/runtime/derive.ts`). Every service computes its
+trigger the same way; it is never duplicated inline.
 
-- **Issue** = a feature request or bug; its body is the **PRD** (human-authored).
-- **Plan file** (`plans/issue-<N>.md`) = the planner's implementation plan,
-  committed to the issue's task branch and carried into the PR.
-- **Status label** = the workflow state (the Kanban column).
-- **Pull request** = the implementer's output, linked to the issue.
+### Managed-PR gate (universal precondition)
 
-GitHub Projects is a *view* over these — the human-facing Kanban board — not a
-second store, so there is nothing to keep in sync.
+A PR is *managed* iff it **adds exactly one `prds/*.md`** AND `headRepo ===
+baseRepo`.
 
-## Status State Machine
+- 0 added PRDs ⇒ ignored entirely (a human's own PR; invisible to the bot).
+- 2+ added PRDs, or a fork ⇒ `blocked` + comment (owned by the planner — the
+  first service to encounter a fresh PR).
+- `slug` = the added PRD's basename; plan path = `plans/<slug>.md`; "has code" =
+  any changed file outside `prds/` and `plans/`.
 
-State lives entirely on the **issue** as a `status:*` label:
+### Stage triggers (each also requires: managed ∧ not `blocked`)
 
 ```txt
-needs-plan      -> a new issue (PRD) awaiting a plan
-ready           -> plan committed; ready to be implemented
-in-progress     -> claimed by the planner/implementer
-in-review       -> PR open, awaiting the reviewer
-needs-fixes      -> reviewer bounced it back (bounded retry loop)
-ready-for-human  -> reviewer passed it; awaiting human review + merge
-done            -> PR merged
-blocked         -> needs human input
+plan        PRD present ∧ no plans/<slug>.md
+implement   PRD ∧ plan present ∧ no code
+review      code ∧ plan present ∧ head SHA not reviewed
+            (latest decisive review's commit_id ≠ head SHA)
+fix         latest review is CHANGES_REQUESTED on the current head
+merge        latest review is APPROVED            (human)
 ```
 
-The reviewer↔implementer `needs-fixes` loop is **bounded** to **3 rounds**
-(tracked by a `fix-round:N` label); on the 3rd failed review the reviewer sets
-`blocked` and escalates to a human instead of bouncing again.
+These are mutually exclusive because the lifecycle is monotonic (PRD → +plan →
++code → +review). The single load-bearing mechanism is "is the current head
+reviewed?", defined as `latestReview.commit_id === headSha`.
+
+## Labels
+
+- **`blocked`** is the only authoritative label. Applied by any stage that runs
+  but cannot produce its artifact (agent reports blocked, agent makes no changes,
+  tests fail, malformed/fork PR). It excludes the PR from all triggers and is
+  **cleared manually by a human** — re-entry into the workflow is an explicit
+  human action.
+- **`status:*`** is a write-only projection for UI glanceability. No trigger ever
+  reads it; it is overwritten on the next poll if it drifts.
 
 ## Runtime
 
-Three independent, always-on **Railway services**, one per agent. They never
-communicate directly — they coordinate **only through GitHub status**.
+One binary, three roles (`src/main.ts` dispatches on `AGENT_ROLE`). Three
+independent, always-on poll loops that never communicate directly — each lists
+open PRs and derives what to do.
 
 ```txt
-Planner service      polls issues labeled "needs-plan"     (~30 min)
-Implementer service  polls sub-issues in "ready"           (~2-5 min)
-Reviewer service     polls PRs / sub-issues in "in-review" (~2-5 min)
+Planner service      ~30 min   (slow; planning is expensive and rare)
+Implementer service  ~2-5 min
+Reviewer service     ~2-5 min
 ```
 
-Each service, each cycle, **drains all actionable work** (processes tasks until
-none remain) so a feature can flow through multiple stages without waiting a
-full poll interval between every handoff.
+Each service runs **concurrency 1**. No "claim" status is needed and none can
+drift: because the trigger is the missing artifact, a crash mid-cycle simply
+leaves the artifact missing, and the next poll recomputes the identical stage and
+resumes.
 
-### Why polling, not webhooks
+## Failure taxonomy
 
-For an AFK system no human waits in real time, so:
+- **Deterministic agent failures** (agent reports blocked, makes no changes,
+  tests red, malformed PR) ⇒ apply `blocked` (park). These would only loop and
+  burn cost if retried.
+- **Infrastructure / SDK / network throws** ⇒ log and retry on the next poll (no
+  label). The missing artifact keeps the trigger true, so a transient fault
+  self-heals. There is no retry cap; logs are the operational safety net.
 
-- **GitHub status is the queue.** Each poll re-reads the current state.
-- **Crash recovery is free.** A restarted service simply re-polls and resumes
-  whatever is still in an actionable status — no in-memory task is ever lost.
-- **No webhook 10-second-ack constraint**, no public ingress, no signature
-  verification, no durability buffer.
+## Agent responsibilities
 
-At 30-minute (planner) and few-minute (implementer/reviewer) intervals, API
-usage stays far under GitHub's free authenticated limit (5,000 requests/hour),
-especially with conditional requests (304s are free).
+### Planner
 
-### Claiming work safely
+Input: a managed PR whose body is the PRD. It **clones the head ref read-only**
+(read tools only — no bash, no test execution, no permission bypass) to ground
+the plan in the real architecture, runs the prd-to-plan methodology
+non-interactively (no quiz, **no plan-approval gate**), and commits a single
+`plans/<slug>.md` via the Contents API. The plan is an architectural-decisions
+header plus **thick**, end-to-end vertical-slice phases, each with
+acceptance-criteria checkboxes — deliberately overriding the usual "many thin
+slices" default, because all phases ship in one PR with no human checkpoint
+between them.
 
-Before starting long work, a service flips the item's status out of its trigger
-state (e.g. `ready -> in-progress`). The next poll's query then naturally skips
-it, so a task is never started twice. A single loop per service (concurrency 1)
-removes any race.
+### Implementer
 
-## Agent Responsibilities
+The **only service that executes project code**. New mode: clone the PR head ref,
+drive the agent (bypassed permissions) to deliver all plan phases as **one commit
+per phase**, run the project's test gate on the **final tree**, and only on green
+do a **single push** of all commits. A crash before that push discards the local
+commits with the temp clone, so the work re-fires cleanly from "no code". It is
+the **sole owner of the PR body** (what / changes / why + links to the PRD and
+plan). Fix mode: build the prompt from the latest changes-requested review body,
+add fixes as commits on top, gate, single push — moving the head so the reviewer
+re-reviews. It never opens a PR.
 
-### Planner Agent
+### Reviewer
 
-Input: a GitHub issue whose body is the PRD.
-Output: a structured implementation plan (overview, ordered steps, test strategy,
-out-of-scope), rendered to `plans/issue-<N>.md` and committed to the issue's
-`task/<N>-slug` branch via the Contents API. Then it moves the issue to `ready`.
-The plan must be concrete enough for the implementer to follow without
-reinterpreting the PRD.
+Acts on a PR whose current head SHA has not been reviewed. It **captures the head
+SHA**, fetches the diff **for that exact SHA**, reviews the cumulative diff
+against the **union of all phases' acceptance criteria**, and submits a native
+review **pinned to that SHA** (a mandatory `commitId`, never defaulting to
+"latest"). If the head moves during review, the review's `commitId` no longer
+equals the new head, so the next poll re-derives `review` — a stale review can
+never count as approval of unseen code.
 
-### Implementer Agent
+The reviewer↔implementer fix loop is **bounded to 3 rounds**, enforced solely via
+`blocked`. The reviewer counts only its **own** `CHANGES_REQUESTED` reviews (a
+human's review never consumes a round); on the third own changes-requested review
+it submits the review **and** applies `blocked` + an escalation comment in the
+same cycle. The implementer-fix trigger does no counting.
 
-Input: the issue (PRD) and the plan file on the task branch.
-Output: code changes on that branch, test results, and a single pull request
-linked to the issue. It follows the plan and stays within its out-of-scope
-boundaries; if the issue/plan can't be done it moves the issue to `blocked`.
-The same agent handles `needs-fixes`: re-checks-out the branch, applies the
-reviewer's findings, and pushes onto the existing PR.
+> GitHub branch protection's "dismiss stale reviews on push" must **not** be
+> enabled — it would flip prior reviews to `DISMISSED` and corrupt the count.
 
-### Reviewer Agent
+## The seam
 
-Input: the issue (PRD), and the PR diff (which includes the plan file) + test output.
-Output: findings ordered by severity and a pass/fail. On fail it moves the issue
-to `needs-fixes` (re-entering the bounded loop, capped at 3); on pass it moves it
-to `ready-for-human`.
+Every service depends on one `GitHubClient` interface (`src/github/pr-client.ts`)
+with an in-memory mock (`pr-mock.ts`) for tests and an Octokit adapter
+(`pr-octokit.ts`) for production. Operations:
 
-## Isolation & Secrets
+- `listOpenPullRequests()` — open PRs with changed files, reviews, head SHA, and
+  head/base repo identity.
+- `getPullRequestDiff(number, sha)` — the cumulative diff pinned to a SHA.
+- `commitFile(branch, path, content, message)` — single-file commit to a PR branch.
+- `submitReview(number, { commitId, event, body })` — native review with a
+  **required** `commitId`.
+- `setPullRequestBody`, `comment`, `addBlockedLabel` / `removeBlockedLabel`,
+  `setStatusProjection`, `getViewerLogin`.
+
+Reused unchanged from earlier iterations: the Agent SDK runner
+(`src/agent/runner.ts`), the structured logger (`src/logger.ts`), the
+crash-resilient poll loop (`src/runtime/loop.ts`), and the git workspace
+(`src/runtime/workspace.ts`).
+
+## Isolation & secrets
 
 - Each agent is its own service, so the service boundary is the isolation
   boundary. The code-executing **implementer** cannot affect the planner or
   reviewer.
-- The implementer service holds a **narrow, repo-scoped** GitHub credential
-  (`contents:write`, `pull_requests:write`). A leak means "can push to this
-  repo", not "controls the GitHub App".
+- The implementer holds a **narrow, repo-scoped** credential (`contents:write`,
+  `pull_requests:write`). A leak means "can push to this repo", not "controls the
+  whole App".
 - The **planner** also needs `contents:write` (it commits the plan file) but runs
-  no untrusted code, so the core boundary — never run code with broad creds —
-  holds. The reviewer and any future database credentials are never present in
-  the implementer's environment.
+  no untrusted code — it reads the codebase but never executes it — so the core
+  boundary holds.
 
 ## Observability
 
-Start with **structured logs per service** (which agent ran, on what item,
-model, token cost, status transitions, errors, timing). A shared **Postgres**
-instance for historical dashboards can be added later — strictly as telemetry,
-never as a second task store.
+Structured logs per service (which service ran, on what PR, model, token cost,
+stage transitions, errors, timing). A shared Postgres for historical dashboards
+can be added later — strictly as telemetry, never as a second state store.
+
+## Testing strategy
+
+- Derivation: the managed gate and all five predicates are exhaustively
+  unit-tested as a pure function.
+- Planner / implementer / reviewer: each is driven end-to-end against the mock
+  client with an injected fake agent runner and fake workspace — no network, no
+  SDK, no real git. Coverage includes blocked-vs-retry taxonomy, the test gate
+  and single push, fix mode from a fabricated changes-requested review, and the
+  cap → blocked escalation.
+- The Octokit client is not unit-tested (it needs a live token + repo); it
+  implements the same interface the mock does.
 
 ## Deferred
 
-- **Collaboration repo** of long-form feature specs authored by PMs. If revived,
-  spec changes are append-only (add a new doc linking the old one).
-- **Cross-repo orchestration** — one control plane managing many source repos
-  (the original `target_repo` model).
-- **Webhooks** — only if instant reaction or many-repo scale is needed.
-- **Postgres-backed monitoring** dashboards.
-
-## Testing Strategy
-
-- Planner tests verify PRD → plan generation and that the plan is committed and
-  the issue moved to `ready`.
-- Implementer tests use a fake workspace + injected runner (no real clone/push);
-  the test gate (no PR unless tests pass) and the fix loop are covered.
-- Reviewer tests use synthetic diffs and exercise the bounded fix-round loop.
-- The GitHub integration is exercised against a mockable client so the agents
-  remain testable without live API calls.
+- GitHub issues, sub-issues, and the `status:*` / `type:*` / `fix-round:N` label
+  machine (removed).
+- PRs authored from forks (parked as `blocked`; same-repo branches only).
+- A human-in-the-loop plan-approval gate (plans are auto-accepted; quality is
+  caught at review/merge).
+- Auto-unpark of a `blocked` PR (clearing is a manual human action).
+- Fanning a multi-phase plan out into multiple PRs (one PRD stays one PR).
+- Cross-repo orchestration, webhooks, and Postgres-backed monitoring.

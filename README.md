@@ -1,146 +1,112 @@
 # Multi-Agent System
 
 A production-oriented multi-agent workflow system where specialized agents
-**plan, implement, and review** engineering work, with **GitHub as the system of
-record**. Features and bugs are filed as GitHub issues; a planner decomposes
-them into tasks (sub-issues); an implementer writes the code and opens a pull
-request; a reviewer checks it against acceptance criteria. Humans validate the
-final implementation before merging.
+**plan, implement, and review** engineering work, with **the pull request as the
+unit of work** from birth to merge. A human opens a PR that adds only a PRD file;
+a planner commits a plan into it; an implementer commits code into it; a reviewer
+submits a native PR review on it; the human merges. The open-PR list is the
+board — there are no issues and no status state machine to keep in sync.
 
-This is intentionally not a demo chatbot. The system is built around durable
-work state, typed agent contracts, and a clear hand-off model.
+This is intentionally not a demo chatbot. It is built around state that **is the
+work** rather than an annotation sitting beside it: every service derives what to
+do purely from a PR's own artifacts (its changed files, its native reviews, its
+head SHA), so a service can crash anywhere and the next poll recomputes the
+identical state and resumes.
 
-> **Design docs:** `architecture.md` (target architecture) and
-> `interview-grill.md` (the decision record behind it).
+> **Design docs:** `architecture.md` (how it works) and `interview-grill.md` (the
+> decision record behind it). Full spec: `prd/pr-first-runtime.md` and
+> `plans/pr-first-runtime.md`.
 
-## Status
-
-The current `src/` code is an **earlier local-first prototype**: a deterministic
-Markdown-brief planner that writes Kanban cards to a local `.kanban/board.json`
-store, plus GitHub issue-draft generation. The project is **pivoting** to the
-GitHub-native, multi-service design described in `architecture.md`. The CLI
-below still works for the prototype; the new agent services are being built.
-
-## Target Workflow
+## Lifecycle
 
 ```txt
-GitHub issue (feature or bug)
-  -> Planner agent      creates sub-issues with scoped requirements + acceptance criteria
-  -> Implementer agent  claims a task, writes code, opens a PR
-  -> Reviewer agent      reviews the PR (bounded fix loop), then marks it ready for a human
-  -> Human               final review + merge
+Human opens a PR adding only prds/<slug>.md   (the PRD — what & why)
+  -> Planner service      commits plans/<slug>.md into the PR
+  -> Implementer service  commits code (all plan phases) and pushes once
+  -> Reviewer service      submits a native review pinned to the head SHA
+  -> Implementer (fix)    addresses changes-requested, pushes again  (loop, cap 3)
+  -> Human                merges once the latest review is an approval
 ```
 
-- **Source of truth:** GitHub. **Board:** GitHub Projects (a view over issues).
-- **Runtime:** three always-on Railway services (planner / implementer /
-  reviewer) that coordinate purely through GitHub status — no queue, no
-  inter-service calls.
-- **Trigger:** polling (planner ~30 min; implementer/reviewer ~2-5 min), each
-  cycle draining all actionable work.
-- **Autonomy:** the full loop runs automatically; the only human gate is the PR
-  merge.
+One PRD equals one PR. There is never a "feature without a PR", so there is no
+gap that needs labels to cover it.
 
-See `architecture.md` for the status state machine, isolation/secrets model, and
-deferred items (collaboration repo, cross-repo orchestration, webhooks,
-Postgres-backed monitoring).
+## Derived state, not stored state
 
-## Automated PR Review (interim)
+Each service is a stateless, concurrency-1 poll loop. Every cycle it lists open
+PRs and, for each, **computes** the stage from the PR's artifacts:
 
-Until the Reviewer agent service is in place, PRs can be reviewed by Claude via
-GitHub Actions: apply the `agent-review` label to a PR and
-`.github/workflows/claude-pr-review.yml` runs the official code-review plugin,
-posting feedback as review comments before a human reviewer takes over. This is
-an interim mechanism that the Reviewer agent will supersede over time.
+| Stage | Trigger (also requires: managed ∧ not `blocked`) | Owner |
+|-------|--------------------------------------------------|-------|
+| plan | PRD present ∧ no `plans/<slug>.md` | planner |
+| implement | PRD ∧ plan present ∧ no code | implementer |
+| review | code ∧ plan present ∧ head SHA not reviewed | reviewer |
+| fix | latest review is `CHANGES_REQUESTED` on the current head | implementer |
+| merge | latest review is `APPROVED` | human |
 
-## Current Prototype (local-first CLI)
+A PR is **managed** iff it adds exactly one `prds/*.md` **and** its head repo
+equals its base repo. A PR that adds no PRD is ignored entirely (your ordinary
+hotfix/docs PRs are never touched); a PR that adds 2+ PRDs or comes from a fork
+is parked with the `blocked` label.
 
-The existing code turns a Markdown brief into local Kanban cards.
+Because the artifact's existence is the guard, processing is idempotent and the
+predicates are mutually exclusive (the lifecycle is monotonic: PRD → +plan →
++code → +review).
 
-Install:
+## Labels
+
+Only **one label is authoritative: `blocked`** — applied by any stage that runs
+but cannot produce its artifact (agent reports blocked, agent makes no changes,
+tests fail, malformed/fork PR). It excludes the PR from every trigger and is
+**cleared manually by a human**. A second, cosmetic `status:*` projection label
+is written for at-a-glance triage but is never read by any logic, so its drift is
+harmless.
+
+## Runtime
+
+One binary, three roles. Each service sets `AGENT_ROLE` and runs its own poll
+loop; services share no state and never talk to each other.
 
 ```bash
 bun install
+
+# run one role as an always-on poll loop
+AGENT_ROLE=planner GITHUB_REPO=owner/repo GITHUB_TOKEN=… bun run src/main.ts
+
+# run a single cycle and exit (manual testing / external cron)
+AGENT_ROLE=reviewer GITHUB_REPO=owner/repo GITHUB_TOKEN=… bun run src/main.ts --once
 ```
 
-Create cards from a Markdown brief:
+Environment: `AGENT_ROLE` (`planner`|`implementer`|`reviewer`), `GITHUB_REPO`
+(`owner/repo`), `GITHUB_TOKEN` (repo-scoped). Optional: `AGENT_MODEL`,
+`POLL_INTERVAL_MS`, `GITHUB_BASE` (default `main`).
+
+### Dry run (real SDK, no GitHub)
+
+Exercise a service against a seeded in-memory PR using the real Claude Agent SDK
+(needs `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`):
 
 ```bash
-bun run src/cli.ts plan specs/example.md
+bun run scripts/dry-run.ts planner
+bun run scripts/dry-run.ts reviewer
 ```
 
-Inspect board:
+## Development
 
 ```bash
-bun run src/cli.ts board
+bun run test        # vitest: derivation + the three services against the mock client
+bun run typecheck   # tsc --noEmit
 ```
 
-Show next ready card:
-
-```bash
-bun run src/cli.ts next
-```
-
-Move a card:
-
-```bash
-bun run src/cli.ts move card-001 in-progress
-```
-
-Generate GitHub issue drafts from cards:
-
-```bash
-bun run src/cli.ts issue-drafts bhargav55/knowledge-assistant
-```
-
-The command currently prints issue-ready JSON. Live GitHub issue creation is
-part of the pivot to the GitHub-native design.
-
-## Markdown Brief Format
-
-Use headings and checklists. The deterministic planner works without an LLM and
-keeps the card model stable.
-
-```md
----
-feature_id: KA-001
-target_repo: bhargav55/knowledge-assistant
-priority: P1
-owner: planner-agent
----
-
-# Build Portfolio Chatbot
-
-## Context
-
-The portfolio needs a production chatbot backed by a knowledge base.
-
-## Research Notes
-
-- Static sites cannot hide API URLs.
-- Backend must own provider credentials.
-
-## Requirements
-
-- Add a browser-safe chatbot endpoint.
-- Ingest portfolio and resume content.
-- Wire the frontend to the endpoint.
-
-## Acceptance Criteria
-
-- The chatbot answers questions about Nunchi experience.
-- Answers cite retrieved sources.
-- No OpenAI key is exposed in frontend code.
-
-## Out of Scope
-
-- Multi-tenant billing.
-- Admin UI.
-```
+All service logic is tested against an in-memory `GitHubClient` mock with an
+injected fake agent runner and fake workspace — no network, no SDK, no real git.
 
 ## Production Principles
 
-- Durable state before automation. GitHub is the system of record.
-- Agent outputs are typed and persisted as issues / sub-issues / PRs.
-- The implementer works from a scoped task, not the original vague brief.
-- Review checks acceptance criteria, not general vibes.
-- Humans validate the final implementation before merge.
+- State **is** the work: derived from the PR's files, reviews, and head SHA — it
+  can never silently disagree with reality.
+- Crash-safe by construction: idempotent stages, single push at the end of
+  implementation, SHA-pinned reviews.
+- The implementer is the only service that executes project code, keeping the
+  sandbox boundary narrow.
+- Exactly one human gate: the merge.

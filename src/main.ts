@@ -1,35 +1,36 @@
 #!/usr/bin/env bun
 /**
- * Service entrypoint. One binary, three roles (decision 4): each Railway service
- * sets AGENT_ROLE and runs the matching agent's poll loop. Coordination is via
- * GitHub status only — services share no state and never talk to each other.
+ * Service entrypoint. One binary, three roles: each service sets AGENT_ROLE and
+ * runs the matching service's poll loop. There is no shared state — every
+ * service lists open PRs and derives what to do from each PR's artifacts.
  */
 
 import { sdkRunner } from "./agent/runner";
 import { loadConfig, type RuntimeConfig } from "./config";
-import { OctokitGitHubClient } from "./github/octokit-client";
+import { OctokitGitHubClient } from "./github/pr-octokit";
+import type { GitHubClient } from "./github/pr-client";
 import { createLogger, type Logger } from "./logger";
-import type { GitHubClient } from "./github/client";
-import { ImplementerAgent } from "./runtime/implementer";
 import { runLoop, type Cycle } from "./runtime/loop";
-import { PlannerAgent } from "./runtime/planner";
-import { ReviewerAgent } from "./runtime/reviewer";
 import { GitWorkspace } from "./runtime/workspace";
+import { ImplementerService } from "./services/implementer";
+import { PlannerService } from "./services/planner";
+import { ReviewerService } from "./services/reviewer";
 
 const buildCycle = (cfg: RuntimeConfig, gh: GitHubClient, log: Logger): Cycle => {
+  const cloneUrl = `https://x-access-token:${cfg.githubToken}@github.com/${cfg.repo.owner}/${cfg.repo.repo}.git`;
   switch (cfg.role) {
     case "planner": {
-      const agent = new PlannerAgent(gh, sdkRunner, cfg.model, log);
+      const workspace = new GitWorkspace({ cloneUrl });
+      const agent = new PlannerService(gh, sdkRunner, workspace, cfg.model, log);
       return () => agent.runOnce();
     }
     case "implementer": {
-      const cloneUrl = `https://x-access-token:${cfg.githubToken}@github.com/${cfg.repo.owner}/${cfg.repo.repo}.git`;
       const workspace = new GitWorkspace({ cloneUrl });
-      const agent = new ImplementerAgent(gh, sdkRunner, workspace, cfg.model, log, cfg.base);
+      const agent = new ImplementerService(gh, sdkRunner, workspace, cfg.model, log);
       return () => agent.runOnce();
     }
     case "reviewer": {
-      const agent = new ReviewerAgent(gh, sdkRunner, cfg.model, log);
+      const agent = new ReviewerService(gh, sdkRunner, cfg.model, log);
       return () => agent.runOnce();
     }
   }
